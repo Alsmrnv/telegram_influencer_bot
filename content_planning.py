@@ -1,9 +1,22 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import sleep
 from typing import Mapping
 
 from content_creating import creating_message, creating_pictures
 from telegram_channel import publish_to_channel
+
+
+def build_weekly_publication_plan(
+    character_profile: Mapping[str, object],
+) -> dict[datetime, str]:
+    """
+    Формирует план публикаций на текущую неделю и возвращает его.
+
+    :param character_profile: Словарь с описанием персонажа.
+    :returns: Словарь с датой/временем публикации и описанием контента.
+    """
+    # TODO: Реализовать эту функцию
+    return {}
 
 
 def run_content_schedule(schedule: Mapping[datetime, str]) -> None:
