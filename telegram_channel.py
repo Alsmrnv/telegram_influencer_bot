@@ -2,8 +2,6 @@
 Публикация текста и изображений в Telegram-канал через Bot API.
 """
 
-from __future__ import annotations
-
 import io
 import json
 import os
