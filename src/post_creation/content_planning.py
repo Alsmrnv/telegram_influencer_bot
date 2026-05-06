@@ -2,8 +2,8 @@ from datetime import datetime
 from time import sleep
 from typing import Mapping
 
-from content_creating import creating_message, creating_pictures
-from telegram_channel import publish_to_channel
+from post_creation.content_creating import creating_message, creating_pictures
+from tg.telegram_channel import publish_to_channel
 
 
 def run_content_schedule(schedule: Mapping[datetime, str]) -> None:

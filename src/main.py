@@ -1,4 +1,4 @@
-from character_creation import get_or_create_character
+from character.character_creation import get_or_create_character
 
 
 def main():
