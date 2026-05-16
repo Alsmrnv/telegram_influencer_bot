@@ -116,3 +116,46 @@ ss -ltnp | grep 1443
 ### Неверный secret
 
 Сгенерируй новый secret из 32 hex-символов и укажи один и тот же `TG_PROXY_SECRET` и при запуске proxy, и в `tools/.env.tools` проекта.
+
+
+## Как добавить себя в ревьюеры
+
+Чтобы бот мог присылать вам посты на ревью, нужно узнать ваш Telegram `chat_id`.
+
+1. Запустите publisher bot:
+
+```bash
+python -m src.tools.tg_publisher.publisher_telethon run
+````
+
+Если вы запускаете команду из папки `src`, используйте:
+
+```bash
+python -m tools.tg_publisher.publisher_telethon run
+```
+
+2. Откройте этого бота в Telegram и отправьте ему команду:
+
+```text
+/id
+```
+
+3. Бот ответит примерно так:
+
+```text
+chat_id: 986985057
+```
+
+4. Добавьте этот id в `.env.tools`:
+
+```env
+TG_REVIEW_CHAT_IDS="986981111"
+```
+
+Если ревьюеров несколько, укажите id через запятую:
+
+```env
+TG_REVIEW_CHAT_IDS="986981111,123456789,777777777"
+```
+
+5. Перезапустите publisher bot или основной сервис, чтобы новые значения из `.env.tools` применились.
