@@ -208,3 +208,7 @@ __marimo__/
 
 # Project generated data
 character_profile.json
+
+# Publisher Bot Stuff ;D
+.env.tools
+/data/tg_publisher

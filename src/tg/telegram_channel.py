@@ -1,59 +1,137 @@
 """
-Публикация текста и изображений в Telegram-канал через Bot API.
+Единая точка публикации в Telegram.
+
+publish_to_channel использует Telethon publisher-бота из tools/tg_publisher:
+- review: отправляет пост ревьюерам с кнопками;
+- direct: сразу публикует в канал;
+- auto: review, если заданы TG_REVIEW_CHAT_ID/TG_REVIEW_CHAT_IDS, иначе direct.
 """
 
+from __future__ import annotations
+
+import asyncio
 import io
-import json
 import os
+import tempfile
+import threading
+import uuid
 from pathlib import Path
 from typing import BinaryIO, Iterable, List, Optional, Union
 
-try:
-    from dotenv import load_dotenv
-except ImportError as e:
-    raise ImportError("Установите python-dotenv: pip install python-dotenv") from e
-
-try:
-    import requests
-except ImportError as e:
-    raise ImportError("Установите requests: pip install requests") from e
-
-_ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(_ENV_PATH)
-
 ImageInput = Union[str, Path, bytes, bytearray, BinaryIO]
-
-TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 MAX_MEDIA_GROUP = 10
-MAX_CAPTION_LENGTH = 1024
 
 
-def _normalize_image(img: ImageInput) -> tuple[str, BinaryIO, bool]:
-    """
-    Приводит вход к бинарному потоку для multipart-загрузки в Telegram.
+def _load_tools_env() -> None:
+    try:
+        from tools.env import load_tools_env
+    except ImportError:
+        from src.tools.env import load_tools_env
 
-    :returns: (имя файла для поля формы, поток, закрывать ли поток после использования).
-    :raises FileNotFoundError: если указан несуществующий файл.
-    """
+    load_tools_env()
+
+
+def _import_publisher():
+    try:
+        from tools.tg_publisher.models import PendingPost
+        from tools.tg_publisher.publisher_telethon import (
+            DEFAULT_SEND_SESSION_NAME,
+            build_bot_from_env,
+        )
+    except ImportError:
+        from src.tools.tg_publisher.models import PendingPost
+        from src.tools.tg_publisher.publisher_telethon import (
+            DEFAULT_SEND_SESSION_NAME,
+            build_bot_from_env,
+        )
+
+    return PendingPost, DEFAULT_SEND_SESSION_NAME, build_bot_from_env
+
+
+def _media_root() -> Path:
+    _load_tools_env()
+    root = os.getenv("TG_MEDIA_DIR", "data/tg_publisher/media")
+    path = Path(root).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _copy_image_to_file(img: ImageInput, dst_dir: Path, index: int) -> str:
     if isinstance(img, (str, Path)):
-        path = Path(img)
+        path = Path(img).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"Файл не найден: {path}")
-        f = open(path, "rb")
-        return path.name, f, True
+        return str(path)
+
+    suffix = ".jpg"
+    out = dst_dir / f"image_{index}{suffix}"
+
     if isinstance(img, (bytes, bytearray)):
-        return "photo.jpg", io.BytesIO(bytes(img)), True
-    return "photo.jpg", img, False
+        out.write_bytes(bytes(img))
+        return str(out)
+
+    data = img.read()
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    out.write_bytes(data)
+    return str(out)
 
 
-def _truncate_caption(text: str) -> str:
-    """
-    Укорачивает подпись к фото до лимита Telegram.
-    Если текст длиннее, обрезает и добавляет многоточие в конце.
-    """
-    if len(text) <= MAX_CAPTION_LENGTH:
-        return text
-    return text[:MAX_CAPTION_LENGTH - 3] + "..."
+def _prepare_image_paths(images: Optional[Iterable[ImageInput]]) -> list[str]:
+    imgs: List[ImageInput] = list(images) if images is not None else []
+    if len(imgs) > MAX_MEDIA_GROUP:
+        raise ValueError(f"Не больше {MAX_MEDIA_GROUP} изображений за один альбом")
+
+    if not imgs:
+        return []
+
+    # Пути передаем как есть; bytes/streams складываем в отдельную папку pending-медиа.
+    temp_dir: Path | None = None
+    paths: list[str] = []
+    for idx, img in enumerate(imgs):
+        if isinstance(img, (str, Path)):
+            paths.append(_copy_image_to_file(img, Path("."), idx))
+            continue
+        if temp_dir is None:
+            temp_dir = _media_root() / uuid.uuid4().hex
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        paths.append(_copy_image_to_file(img, temp_dir, idx))
+    return paths
+
+
+def _selected_publish_mode() -> str:
+    _load_tools_env()
+    raw = os.getenv("TG_PUBLISH_MODE", "auto").strip().lower()
+    if raw not in {"auto", "review", "direct"}:
+        raise ValueError("TG_PUBLISH_MODE must be one of: auto, review, direct")
+    if raw != "auto":
+        return raw
+
+    if os.getenv("TG_REVIEW_CHAT_ID") or os.getenv("TG_REVIEW_CHAT_IDS"):
+        return "review"
+    return "direct"
+
+
+def _run_sync(coro) -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+        return
+
+    error: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - forwarded to caller
+            error.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=False)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
 
 
 def publish_to_channel(
@@ -63,106 +141,37 @@ def publish_to_channel(
     parse_mode: Optional[str] = "HTML",
 ) -> dict:
     """
-    Публикует пост в канал: текст, одно фото с подписью или альбом (до 10 снимков).
+    Публикует пост через publisher-бота из tools/tg_publisher.
 
-    :param text: Текст сообщения или подпись к фото/альбому.
-    :param images: Пути, bytes или бинарные потоки; None — только текст.
-    :param parse_mode: "HTML", "MarkdownV2" или None (без разметки).
-    :returns: Полный JSON-ответ метода Bot API.
-    :raises ValueError: больше 10 изображений или нет токена/id канала в окружении.
-    :raises requests.HTTPError: ошибка HTTP при обращении к API.
-    :raises RuntimeError: в теле ответа 'ok: false'.
+    Управление режимом:
+    - TG_PUBLISH_MODE=review: отправить preview ревьюерам;
+    - TG_PUBLISH_MODE=direct: сразу отправить в TG_CHANNEL_ID;
+    - TG_PUBLISH_MODE=auto: review при наличии TG_REVIEW_CHAT_ID(S), иначе direct.
+
+    Бот-слушатель запускается вместе с сервисом в main.py. Здесь используется
+    отдельная sender-session, чтобы отправка preview/direct не конфликтовала с
+    процессом, который слушает кнопки ревью.
     """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    cid = os.environ.get("TELEGRAM_CHANNEL_ID")
-    if not token:
-        raise ValueError(
-            "В .env (или окружении) задайте TELEGRAM_BOT_TOKEN"
+    PendingPost, DEFAULT_SEND_SESSION_NAME, build_bot_from_env = _import_publisher()
+
+    image_paths = _prepare_image_paths(images)
+    post = PendingPost.create(text=text or "", image_paths=image_paths)
+    mode = _selected_publish_mode()
+
+    if mode == "review":
+        bot = build_bot_from_env(
+            require_review=True,
+            require_channel=True,
+            session_name=os.getenv("TG_PUBLISHER_SEND_SESSION", DEFAULT_SEND_SESSION_NAME),
+            parse_mode=parse_mode,
         )
-    if not cid:
-        raise ValueError(
-            "В .env (или окружении) задайте TELEGRAM_CHANNEL_ID"
-        )
-    cid = str(cid)
-    imgs: List[ImageInput] = list(images) if images is not None else []
+        _run_sync(bot.deliver_for_review(post))
+        return {"ok": True, "mode": "review", "pending_id": post.id}
 
-    if len(imgs) > MAX_MEDIA_GROUP:
-        raise ValueError(
-            f"Не больше {MAX_MEDIA_GROUP} изображений за один альбом"
-        )
-
-    caption = _truncate_caption(text) if text else None
-
-    if not imgs:
-        payload: dict = {"chat_id": cid, "text": text or ""}
-        if parse_mode and text:
-            payload["parse_mode"] = parse_mode
-        r = requests.post(
-            TELEGRAM_API.format(token=token, method="sendMessage"),
-            json=payload,
-            timeout=120,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if not data.get("ok"):
-            raise RuntimeError(data.get("description", str(data)))
-        return data
-
-    opened: list[tuple[BinaryIO, bool]] = []
-
-    try:
-        if len(imgs) == 1:
-            name, stream, close_me = _normalize_image(imgs[0])
-            opened.append((stream, close_me))
-            files = {"photo": (name, stream)}
-            data_fields: dict = {"chat_id": cid}
-            if caption is not None:
-                data_fields["caption"] = caption
-            if parse_mode and caption:
-                data_fields["parse_mode"] = parse_mode
-            r = requests.post(
-                TELEGRAM_API.format(token=token, method="sendPhoto"),
-                data=data_fields,
-                files=files,
-                timeout=120,
-            )
-        else:
-            media: list[dict] = []
-            multipart: list[tuple[str, tuple[str, BinaryIO]]] = []
-            for i, item in enumerate(imgs):
-                name, stream, close_me = _normalize_image(item)
-                opened.append((stream, close_me))
-                attach = f"file{i}"
-                multipart.append(
-                    (attach, (name or f"photo_{i}.jpg", stream))
-                )
-                entry: dict = {"type": "photo", "media": f"attach://{attach}"}
-                if i == 0 and caption is not None:
-                    entry["caption"] = caption
-                    if parse_mode:
-                        entry["parse_mode"] = parse_mode
-                media.append(entry)
-
-            data_fields = {
-                "chat_id": cid,
-                "media": json.dumps(media),
-            }
-            r = requests.post(
-                TELEGRAM_API.format(token=token, method="sendMediaGroup"),
-                data=data_fields,
-                files=multipart,
-                timeout=120,
-            )
-
-        r.raise_for_status()
-        body = r.json()
-        if not body.get("ok"):
-            raise RuntimeError(body.get("description", str(body)))
-        return body
-    finally:
-        for stream, close_me in opened:
-            if close_me:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
+    bot = build_bot_from_env(
+        require_channel=True,
+        session_name=os.getenv("TG_PUBLISHER_SEND_SESSION", DEFAULT_SEND_SESSION_NAME),
+        parse_mode=parse_mode,
+    )
+    _run_sync(bot.deliver_direct(post))
+    return {"ok": True, "mode": "direct", "pending_id": post.id}
