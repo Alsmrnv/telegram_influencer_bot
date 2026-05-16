@@ -1,5 +1,5 @@
 from typing import Iterable, Optional, Tuple
-from tg.telegram_channel import ImageInput
+from telegram_channel import ImageInput
 
 
 def creating_message(content: str) -> Tuple[str, Optional[str]]:
