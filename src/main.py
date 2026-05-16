@@ -1,5 +1,5 @@
 from character_creation import get_or_create_character
-from content_planning import build_weekly_publication_plan, run_content_schedule
+from content_planning import run_weekly_content_cycle, sleep_until_next_week_start
 
 
 def main():
@@ -8,11 +8,12 @@ def main():
         "направления, сравнивает маршруты по бюджету, времени и комфорту и "
         "публикует практичные гиды."
     )
-    # Сейчас функция работает только неделю
-    # TODO: Нужно сделать так, чтобы функция работала много недель
-    plan = build_weekly_publication_plan(profile)
-    run_content_schedule(plan)
-    print("Content schedule completed")
+    first_cycle = True
+    while True:
+        if not first_cycle:
+            sleep_until_next_week_start()
+        first_cycle = False
+        run_weekly_content_cycle(profile)
 
 if __name__ == "__main__":
     main()
