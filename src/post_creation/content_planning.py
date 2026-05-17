@@ -3,7 +3,7 @@ from time import sleep
 from typing import Mapping
 
 from content_creating import creating_message, creating_pictures
-from telegram_channel import publish_to_channel
+from tg.telegram_channel import publish_to_channel
 
 
 def current_week_start(now: datetime | None = None) -> datetime:
