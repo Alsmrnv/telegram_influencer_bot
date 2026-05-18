@@ -4,19 +4,19 @@ import asyncio
 import os
 import threading
 
-try:
+if __package__:
+    from .character.character_creation import get_or_create_character
+    from .post_creation.content_planning import run_weekly_content_cycle, sleep_until_next_week_start
+else:
     from character.character_creation import get_or_create_character
     from post_creation.content_planning import run_weekly_content_cycle, sleep_until_next_week_start
-except ImportError:
-    from src.character.character_creation import get_or_create_character
-    from src.post_creation.content_planning import run_weekly_content_cycle, sleep_until_next_week_start
 
 
 def _load_tools_env() -> None:
-    try:
+    if __package__:
+        from .tools.env import load_tools_env
+    else:
         from tools.env import load_tools_env
-    except ImportError:
-        from src.tools.env import load_tools_env
 
     load_tools_env()
 
@@ -39,10 +39,10 @@ def start_tg_publisher_bot_with_service() -> threading.Thread | None:
         print("TG publisher bot is not started; missing env: " + ", ".join(missing))
         return None
 
-    try:
+    if __package__:
+        from .tools.tg_publisher.publisher_telethon import build_bot_from_env
+    else:
         from tools.tg_publisher.publisher_telethon import build_bot_from_env
-    except ImportError:
-        from src.tools.tg_publisher.publisher_telethon import build_bot_from_env
 
     def runner() -> None:
         bot = build_bot_from_env()

@@ -25,6 +25,15 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+_latent_cache/
+
+# third party stuff
+src/generation/image/ai-toolkit/
+
+# lora dataset runs
+src/generation/text/lora_personalization/dry_dataset_runs
+output/
+loras/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
