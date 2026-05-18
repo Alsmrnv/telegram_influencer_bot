@@ -50,7 +50,7 @@ def sleep_until_next_week_start(now: datetime | None = None) -> None:
 def run_weekly_content_cycle(character_profile: Mapping[str, object]) -> None:
     """Строит план на неделю и выполняет публикации по расписанию."""
     plan = build_weekly_publication_plan(character_profile)
-    run_content_schedule(plan)
+    run_content_schedule(plan, character_profile)
     print("Content schedule completed")
 
 
@@ -250,11 +250,15 @@ def build_weekly_publication_plan(
     return schedule
 
 
-def run_content_schedule(schedule: Mapping[datetime, str]) -> None:
+def run_content_schedule(
+    schedule: Mapping[datetime, str],
+    character_profile: Mapping[str, object],
+) -> None:
     """
     Выполняет обработку описаний контента по расписанию.
 
     :param schedule: Словарь, где ключ — datetime, а значение — описание контента для обработки.
+    :param character_profile: Словарь с описанием персонажа.
     """
     prepared: list[tuple[datetime, str]] = []
 
@@ -267,6 +271,6 @@ def run_content_schedule(schedule: Mapping[datetime, str]) -> None:
 
         if wait_seconds > 0:
             sleep(wait_seconds)
-        text, parse_mode = creating_message(content)
-        images = creating_pictures(content)
+        text, parse_mode = creating_message(content, character_profile)
+        images = creating_pictures(content, character_profile)
         publish_to_channel(text=text, images=images, parse_mode=parse_mode)
