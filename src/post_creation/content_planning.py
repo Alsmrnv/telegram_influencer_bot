@@ -18,7 +18,7 @@ except ImportError as e:
     raise ImportError("Установите requests: pip install requests") from e
 
 from content_creating import creating_message, creating_pictures
-from telegram_channel import publish_to_channel
+from tg.telegram_channel import publish_to_channel
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_PROJECT_ROOT / ".env")
