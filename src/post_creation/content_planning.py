@@ -18,10 +18,12 @@ except ImportError as e:
     raise ImportError("Установите requests: pip install requests") from e
 
 try:
-    from post_creation.content_creating import creating_message, creating_pictures
+    from character.character_memory import register_published_post
+    from post_creation.content_creating import build_character_memory, creating_message, creating_pictures
     from tg.telegram_channel import publish_to_channel
 except ImportError:
-    from src.post_creation.content_creating import creating_message, creating_pictures
+    from src.character.character_memory import register_published_post
+    from src.post_creation.content_creating import build_character_memory, creating_message, creating_pictures
     from src.tg.telegram_channel import publish_to_channel
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -275,6 +277,17 @@ def run_content_schedule(
 
         if wait_seconds > 0:
             sleep(wait_seconds)
-        text, parse_mode = creating_message(content, character_profile)
+        memory_context = build_character_memory(content, character_profile)
+        text, parse_mode = creating_message(
+            content,
+            character_profile,
+            memory_context=memory_context,
+        )
         images = creating_pictures(content, character_profile)
         publish_to_channel(text=text, images=images, parse_mode=parse_mode)
+        register_published_post(
+            character_profile,
+            post_text=text,
+            source_event=content,
+            published_at=datetime.now(),
+        )

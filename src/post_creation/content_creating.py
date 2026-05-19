@@ -20,6 +20,10 @@ try:
     from tg.telegram_channel import ImageInput
 except ImportError:  # pragma: no cover
     from src.tg.telegram_channel import ImageInput
+try:
+    from character.character_memory import build_memory_context
+except ImportError:  # pragma: no cover
+    from src.character.character_memory import build_memory_context
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_PROJECT_ROOT / ".env")
@@ -177,13 +181,19 @@ def _system_prompt() -> str:
 """.strip()
 
 
-def _user_prompt(content: Any, character_profile: Mapping[str, object]) -> str:
+def _user_prompt(
+    content: Any,
+    character_profile: Mapping[str, object],
+    memory_context: str = "",
+) -> str:
+    memory_block = f"\n\n{memory_context}\n" if memory_context.strip() else ""
     return f"""
 Профиль персонажа:
 {json.dumps(dict(character_profile), ensure_ascii=False, indent=2)}
 
 Событие дня:
 {_pretty(content)}
+{memory_block}
 
 Напиши готовый пост для канала персонажа.
 """.strip()
@@ -238,6 +248,7 @@ def creating_message(
     *,
     model: str = DEFAULT_MODEL,
     parse_mode: Optional[str] = None,
+    memory_context: str = "",
 ) -> Tuple[str, Optional[str]]:
     """
     Создаёт текст поста по событию и профилю персонажа.
@@ -251,7 +262,7 @@ def creating_message(
         try:
             result = _chat_json(
                 _system_prompt(),
-                _user_prompt(content, character_profile),
+                _user_prompt(content, character_profile, memory_context=memory_context),
                 model=model,
                 temperature=temperature,
             )
@@ -407,3 +418,11 @@ def creating_pictures(
         output_path=out,
     )
     return [str(out)]
+
+
+def build_character_memory(
+    content: str,
+    character_profile: Mapping[str, object],
+) -> str:
+    """Builds optional memory context for post generation."""
+    return build_memory_context(character_profile, current_event=content)
