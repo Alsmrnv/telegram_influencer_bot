@@ -209,3 +209,4 @@ __marimo__/
 # Publisher Bot Stuff ;D
 .env.tools
 /data/tg_publisher
+src/generation/image/loras/**

@@ -29,6 +29,23 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = os.getenv("OPENROUTER_TEXT_MODEL", "deepseek/deepseek-chat-v3.1")
 MAX_TELEGRAM_POST_CHARS = int(os.getenv("POST_MAX_CHARS", "1400"))
 
+LORA_CHARACTER_TRIGGER = "ohwx_borat_jeffrey_v1"
+DEFAULT_IMAGE_LORA_PATH = os.getenv(
+    "IMAGE_LORA_PATH",
+    "src/generation/image/loras/zimage_turbo_lora_a100/zimage_turbo_lora_a100.safetensors",
+)
+DEFAULT_IMAGE_OUTPUT_PATH = os.getenv("POST_IMAGE_OUTPUT_PATH", "image.png")
+DEFAULT_IMAGE_ASPECT = os.getenv("POST_IMAGE_ASPECT", "1:1")
+DEFAULT_IMAGE_SEED = int(os.getenv("POST_IMAGE_SEED", "42"))
+DEFAULT_IMAGE_STEPS = int(os.getenv("POST_IMAGE_STEPS", "50"))
+DEFAULT_IMAGE_GUIDANCE_SCALE = float(os.getenv("POST_IMAGE_GUIDANCE_SCALE", "0.0"))
+DEFAULT_IMAGE_NEGATIVE_PROMPT = os.getenv(
+    "POST_IMAGE_NEGATIVE_PROMPT",
+    "low resolution, low quality, bad anatomy, deformed hands, extra fingers, "
+    "oversaturated, waxy skin, plastic face, no facial details, overly smooth, "
+    "AI-looking image, messy composition, blurry text, distorted text, watermark, logo",
+)
+
 # Only typographic punctuation is normalized here. The ordinary hyphen "-" is NOT touched,
 # so words like "прямо-таки", "по-хорошему" and "ML-стек" stay intact.
 PUNCT_TRANSLATION = str.maketrans(
@@ -249,214 +266,144 @@ def creating_message(
     raise MessageCreationError(f"Не удалось сгенерировать пост: {last_error}")
 
 
+def _image_system_prompt() -> str:
+    return f"""
+Ты пишешь промпт для генератора изображений по посту Telegram-персонажа.
+
+Нужно выбрать ОДИН визуальный сюжет из события и превратить его в обычный image-generation prompt:
+- prompt должен быть на английском;
+- prompt должен начинаться с точного LoRA-триггера: {LORA_CHARACTER_TRIGGER};
+- в prompt должен быть один главный персонаж, одна сцена и одно действие/состояние;
+- используй только факты из профиля и события, не выдумывай новые места, предметы, людей, бренды и текст на картинке;
+- не пытайся пересказать всё событие, выбери самый визуальный момент;
+- добавь перечисление видимых деталей: character, setting, action, key objects, mood, composition, lighting, camera/framing, image quality;
+- не добавляй надписи, субтитры, мемный текст, speech bubbles, watermark или логотипы;
+- не делай NSFW, насилие, кровь, политическую агитацию или оскорбительные карикатуры.
+
+Верни строго JSON-объект:
+{{
+  "plot": "кратко по-русски, какой сюжет выбран",
+  "prompt": "готовый английский prompt для генератора",
+  "negative_prompt": "английский negative prompt, можно дополнить стандартный"
+}}
+""".strip()
+
+
+def _image_user_prompt(content: Any, character_profile: Mapping[str, object]) -> str:
+    return f"""
+Профиль персонажа:
+{json.dumps(dict(character_profile), ensure_ascii=False, indent=2)}
+
+Событие дня:
+{_pretty(content)}
+
+Выбери один визуальный сюжет и напиши prompt для генерации картинки.
+""".strip()
+
+
+def _normalize_image_prompt(prompt: Any) -> str:
+    value = _normalize_text(prompt)
+    value = re.sub(r"\s+", " ", value).strip()
+    if not value:
+        raise MessageCreationError("LLM вернул пустой image prompt")
+    if LORA_CHARACTER_TRIGGER not in value:
+        value = f"{LORA_CHARACTER_TRIGGER}, {value}"
+    elif not value.startswith(LORA_CHARACTER_TRIGGER):
+        value = re.sub(rf"\b{re.escape(LORA_CHARACTER_TRIGGER)}\b\s*,?\s*", "", value).strip()
+        value = f"{LORA_CHARACTER_TRIGGER}, {value}"
+    return value
+
+
+def _normalize_negative_prompt(negative_prompt: Any) -> str:
+    custom = _normalize_text(negative_prompt)
+    parts = [DEFAULT_IMAGE_NEGATIVE_PROMPT]
+    if custom:
+        parts.append(custom)
+    return ", ".join(part.strip().strip(",") for part in parts if part and part.strip())
+
+
+def _resolve_project_path(path: str | Path) -> Path:
+    p = Path(path).expanduser()
+    if p.is_absolute():
+        return p
+    return (_PROJECT_ROOT / p).resolve()
+
+
+def _load_image_generator(*, lora_path: str | Path = DEFAULT_IMAGE_LORA_PATH):
+    try:
+        from generation.image.image_generator import ImageGenerator
+    except ImportError:  # pragma: no cover
+        from src.generation.image.image_generator import ImageGenerator
+
+    return ImageGenerator(lora_path=str(_resolve_project_path(lora_path)))
+
+
+def creating_image_prompt(
+    content: str,
+    character_profile: Mapping[str, object],
+    *,
+    model: str = DEFAULT_MODEL,
+) -> tuple[str, str]:
+    """
+    Создаёт prompt/negative_prompt для image generator через OpenRouter.
+
+    Агент выбирает один визуальный сюжет из content и обязательно вставляет
+    LoRA-триггер персонажа LORA_CHARACTER_TRIGGER в начало prompt.
+    """
+    result = _chat_json(
+        _image_system_prompt(),
+        _image_user_prompt(content, character_profile),
+        model=model,
+        temperature=0.55,
+    )
+    prompt = _normalize_image_prompt(result.get("prompt"))
+    negative_prompt = _normalize_negative_prompt(result.get("negative_prompt"))
+
+    print("\n[IMAGE PROMPT GENERATOR]")
+    print("[PROMPT]", prompt)
+    print("[NEGATIVE_PROMPT]", negative_prompt)
+    print("[/IMAGE PROMPT GENERATOR]\n")
+
+    return prompt, negative_prompt
+
+
 def creating_pictures(
     content: str,
     character_profile: Mapping[str, object],
+    *,
+    model: str = DEFAULT_MODEL,
+    output_path: str | Path = DEFAULT_IMAGE_OUTPUT_PATH,
+    lora_path: str | Path = DEFAULT_IMAGE_LORA_PATH,
+    aspect: str = DEFAULT_IMAGE_ASPECT,
+    seed: int = DEFAULT_IMAGE_SEED,
 ) -> Optional[Iterable[ImageInput]]:
-    """Заглушка для будущей генерации изображений."""
-    return None
+    """
+    Генерирует одну картинку к посту и возвращает список путей для publish_to_channel.
 
+    Пайплайн:
+    1. OpenRouter выбирает один визуальный сюжет и пишет prompt.
+    2. Локальный ImageGenerator с LoRA рисует картинку в output_path.
+    3. Возвращается [output_path], потому что Telegram publisher уже умеет принимать paths.
+    """
+    prompt, negative_prompt = creating_image_prompt(
+        content,
+        character_profile,
+        model=model,
+    )
 
-TEST_CASES: list[dict[str, Any]] = [
-    {
-        "name": "travel_analyst_budapest",
-        "character_profile": {
-            "name": "Марк Орлов",
-            "age": 32,
-            "home_city": "Москва",
-            "travel_style": "системный аналитический подход с акцентом на эффективность, бюджет и комфорт",
-            "tone_of_voice": "сдержанный, информативный, структурированный, без лишних эмоций, с четкими выводами",
-            "interests": [
-                "статистика путешествий",
-                "оптимизация маршрутов",
-                "экономика туризма",
-                "урбанистика",
-                "исторический контекст мест",
-            ],
-            "goals": [
-                "создать базу данных объективных оценок направлений",
-                "помочь путешественникам принимать взвешенные решения",
-                "разработать алгоритмы для идеального планирования поездок",
-            ],
-            "quirks": [
-                "всегда считает стоимость поездки до копейки",
-                "сравнивает отели по соотношению цена/качество в Excel",
-                "предпочитает общественный транспорт такси для анализа инфраструктуры",
-            ],
-            "backstory": "Бывший финансовый аналитик, который устал от офиса и превратил любовь к цифрам и путешествиям в личный канал.",
-        },
-        "content": {
-            "destination": {
-                "name": "Будапешт",
-                "country": "Венгрия",
-                "why_trending": "недорогой европейский город для коротких поездок",
-            },
-            "location": "Будапешт",
-            "events": ["много ходил пешком", "вечером зашел в термальные купальни"],
-            "actions": ["сравнил дневной проездной и разовые билеты", "несколько раз отказался от такси"],
-            "observations": ["город удобно смотреть пешком", "общественный транспорт закрывает основные точки"],
-            "result": "день вышел дешевле и спокойнее, чем ожидалось",
-        },
-    },
-    {
-        "name": "old_fisherman_baikal_fine",
-        "character_profile": {
-            "name": "Семён Петрович",
-            "age": 67,
-            "home_city": "Иркутск",
-            "tone_of_voice": "ворчливый, тёплый, с короткими фразами, без пафоса",
-            "interests": ["рыбалка", "старые лодочные моторы", "погода", "байкальские истории"],
-            "quirks": [
-                "разговаривает с озером как с живым",
-                "ругает правила, но в итоге их соблюдает",
-                "любит бытовые детали про снасти",
-            ],
-            "backstory": "Старый рыбак, который всю жизнь ездит на Байкал и считает, что раньше всё было проще.",
-        },
-        "content": {
-            "destination": {"name": "озеро Байкал", "country": "Россия"},
-            "location": "берег Байкала",
-            "events": [
-                "приехал рано утром на рыбалку",
-                "пытался ловить мальков у берега",
-                "получил штраф от инспектора",
-            ],
-            "actions": ["достал старую удочку", "спорил с инспектором про правила", "убрал снасти после штрафа"],
-            "observations": [
-                "вода была прозрачная",
-                "мальки стояли у самой кромки",
-                "инспектор говорил спокойно, но уверенно",
-            ],
-            "facts": ["ловля мальков в этом месте запрещена", "штраф выписали на месте"],
-            "result": "уехал без улова, но с квитанцией",
-        },
-    },
-    {
-        "name": "hse_phystech_deputy_director_mobile",
-        "character_profile": {
-            "name": "Игорь Валерьевич",
-            "age": 44,
-            "home_city": "Москва",
-            "role": "заместитель директора в Физтех-школе ВШПИ",
-            "tone_of_voice": "ироничный, управленческий, слегка злорадный, но не карикатурный",
-            "interests": [
-                "образовательные траектории",
-                "нагрузка преподавателей",
-                "карьерные треки студентов",
-                "таблицы распределения",
-            ],
-            "goals": [
-                "закрыть проблемные направления студентами",
-                "сделать вид, что всё было стратегическим решением",
-            ],
-            "quirks": [
-                "потирает руки, когда план сходится",
-                "называет хаос гибким управлением",
-                "любит слово перераспределение",
-            ],
-            "backstory": "Администратор, который слишком хорошо понял, что студентов можно двигать между треками почти как ресурсы в расписании.",
-        },
-        "content": {
-            "location": "Физтех-школа ВШПИ",
-            "events": [
-                "трёх студентов из ML-стека перевели на мобильную разработку",
-                "в мобильном треке не хватало людей на проект",
-                "в расписании освободились спорные слоты",
-            ],
-            "actions": [
-                "подписал перераспределение",
-                "отправил студентам письмо с нейтральной формулировкой",
-                "отметил изменения в таблице",
-            ],
-            "observations": [
-                "студенты сначала думали, что это временно",
-                "куратор мобильного трека заметно оживился",
-            ],
-            "facts": [
-                "перевод касается трёх студентов",
-                "исходный трек студентов - ML",
-                "новый трек - мобильная разработка",
-            ],
-            "result": "мобильный проект получил команду, ML-стек стал чуть тише",
-        },
-    },
-    {
-        "name": "minimal_food_blogger_failed_soup",
-        "character_profile": {
-            "name": "Лена Морковь",
-            "tone_of_voice": "быстрая, эмоциональная, самоироничная",
-            "quirks": ["всё сравнивает с супом", "делает вид, что провалы - это концепция"],
-        },
-        "content": {
-            "location": "домашняя кухня",
-            "events": ["готовила тыквенный суп", "пересолила"],
-            "observations": ["цвет получился красивый", "вкус напоминал море"],
-            "result": "суп ушёл в статус соуса",
-        },
-    },
-    {
-        "name": "museum_guard_new_exhibit",
-        "character_profile": {
-            "name": "Аркадий",
-            "age": 58,
-            "home_city": "Санкт-Петербург",
-            "role": "смотритель в небольшом музее",
-            "tone_of_voice": "сдержанный, сухой, наблюдательный, с неожиданной нежностью",
-            "interests": ["тишина в залах", "посетители, которые читают таблички", "старые рамы"],
-            "goals": ["чтобы люди не трогали экспонаты", "чтобы новый зал не превратили в фотозону"],
-            "quirks": [
-                "запоминает посетителей по обуви",
-                "раздражается на громкий шёпот",
-                "уважает тех, кто смотрит дольше минуты",
-            ],
-            "backstory": "Работает в музее много лет и делает вид, что устал от людей, хотя на самом деле внимательно за ними следит.",
-        },
-        "content": {
-            "destination": {"name": "зал северного модерна", "country": "Россия"},
-            "location": "малый музейный корпус",
-            "events": [
-                "открыли новый зал",
-                "первые посетители пришли сразу после обеда",
-                "один школьник долго рассматривал маленький эскиз в углу",
-            ],
-            "actions": [
-                "поправил табличку у входа",
-                "три раза попросил не прислоняться к витрине",
-                "посоветовал паре начать осмотр с правой стены",
-            ],
-            "observations": [
-                "в новом зале стало тише, чем в основном",
-                "люди сначала фотографировали большую работу, а потом замечали эскизы",
-                "на полу снова появились мокрые следы от обуви",
-            ],
-            "facts": ["экспозиция временная", "в зале есть эскизы и большая центральная работа"],
-            "result": "зал пережил первый день без отпечатков пальцев на стекле",
-        },
-    },
-    {
-        "name": "sparse_courier_rain",
-        "character_profile": {
-            "name": "Даня",
-            "age": 23,
-            "tone_of_voice": "коротко, устало, смешно, без литературности",
-            "quirks": ["считает лужи личными врагами", "пишет так, будто рассказывает другу в голосовом"],
-        },
-        "content": {
-            "location": "город после дождя",
-            "events": ["развозил заказы под дождём", "пакет с раменом остался цел"],
-            "result": "промок сам, еда доехала нормально",
-        },
-    },
-]
+    out = Path(output_path).expanduser()
+    if not out.is_absolute():
+        out = Path.cwd() / out
+    out.parent.mkdir(parents=True, exist_ok=True)
 
-
-if __name__ == "__main__":
-    for case in TEST_CASES:
-        print("\n" + "=" * 80)
-        print("[CASE]", case["name"])
-        text, mode = creating_message(
-            json.dumps(case["content"], ensure_ascii=False),
-            case["character_profile"],
-        )
-        print("[PARSE_MODE]", mode)
-        print(text)
+    generator = _load_image_generator(lora_path=lora_path)
+    generator.generate(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        aspect=aspect,  # type: ignore[arg-type]
+        num_inference_steps=DEFAULT_IMAGE_STEPS,
+        guidance_scale=DEFAULT_IMAGE_GUIDANCE_SCALE,
+        seed=seed,
+        output_path=out,
+    )
+    return [str(out)]
