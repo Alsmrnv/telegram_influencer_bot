@@ -38,4 +38,4 @@ cd src
 PYTHONPATH=character:post_creation:tg python main.py
 ```
 
-Профиль персонажа сохраняется в `character_profile.json`.
+Профиль персонажа сохраняется в `src/character/character_profile.json`.

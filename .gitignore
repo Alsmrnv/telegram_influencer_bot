@@ -207,7 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 # Project generated data
-character_profile.json
+src/character/character_profile.json
 
 # Publisher Bot Stuff ;D
 .env.tools
