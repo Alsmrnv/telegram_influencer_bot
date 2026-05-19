@@ -1,0 +1,65 @@
+# LoRA для Tongyi-MAI/Z-Image-Turbo (ai-toolkit).
+# Обязательно: arch: zimage + assistant_lora_path (адаптер для обучения на дистиллированной Turbo).
+# name_or_path: HF id или локальная папка со snapshot (transformer/, text_encoder/, vae/, tokenizer/).
+job: extension
+config:
+  name: "zimage_turbo_lora_a100"
+  process:
+    - type: "sd_trainer"
+      training_folder: "output"
+      device: cuda:0
+      trigger_word: "ohwx_borat_jeffrey_v1"
+      network:
+        type: "lora"
+        linear: 32
+        linear_alpha: 32
+      save:
+        dtype: bfloat16
+        save_every: 200
+        max_step_saves_to_keep: 3
+      datasets:
+        # Запуск из каталога image/ — картинки + .txt рядом: image/data/tune_images/
+        - folder_path: "data/tune_images"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          shuffle_tokens: false
+          cache_latents_to_disk: true
+          resolution: [512, 768, 1024]
+      train:
+        batch_size: 4
+        steps: 1600
+        gradient_accumulation_steps: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        optimizer: "adamw8bit"
+        lr: 0.0001
+        timestep_type: "weighted"
+        ema_config:
+          use_ema: true
+          ema_decay: 0.99
+        dtype: bf16
+      model:
+        arch: "zimage"
+        name_or_path: "Tongyi-MAI/Z-Image-Turbo"
+        assistant_lora_path: "ostris/zimage_turbo_training_adapter/zimage_turbo_training_adapter_v2.safetensors"
+        quantize: false
+        quantize_te: false
+        low_vram: false
+      sample:
+        sampler: "flowmatch"
+        sample_every: 200
+        width: 1024
+        height: 1024
+        guidance_scale: 1.0
+        sample_steps: 8
+        prompts:
+          - "ohwx_borat_jeffrey_v1 in a space suit, high detail"
+          - "ohwx_borat_jeffrey_v1 holding a sign that says 'Z-Image Turbo'"
+          - "ohwx_borat_jeffrey_v1 on a rocky lakeshore, fishing vest, calm lake, golden hour"
+          - "ohwx_borat_jeffrey_v1 in a space suit, high detail"
+          - "ohwx_borat_jeffrey_v1 holding a sign that says 'A100 POWER'"
+          - "ohwx_borat_jeffrey_v1 on the beach, surfing desk on a shoulder, wears bikini,
+            smiling"
+          - "ohwx_borat_jeffrey_v1 standing on rocky lakeshore holding a fishing rod, olive fishing vest and jacket, baseball cap with sunglasses on brim, calm lake, forest and mountains, soft golden-hour light"
