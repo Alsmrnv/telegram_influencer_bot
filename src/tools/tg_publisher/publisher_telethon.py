@@ -478,22 +478,36 @@ class TgTelethonPublisher:
 
         action, post_id = data.split(":", 1)
         if action not in KNOWN_ACTIONS:
-            await _safe_answer(event, f"Unknown action for post {post_id}: {action}", alert=False)
+            await _safe_answer(event, "Unknown action", alert=False)
             return
 
         # ACK FIRST, WORK LATER.
         #
-        # This is the key demo requirement: the first reviewer must immediately see
-        # Telegram's small grey toast ("Sent" / "Rejected"), not a blocking alert.  Do this before disk IO,
-        # before the local lock, before loading the JSON, and before publishing media.
+        # Telegram callback queries are time-sensitive. If the handler performs
+        # disk IO, channel publishing, media upload, deletion, or message editing
+        # before answering the callback, Telegram clients may show their own
+        # stale-query toast like "Post is already gone".
+        #
+        # So the callback lifecycle ends here as fast as possible. Publishing is
+        # moved into a background task.
         ack_text = "Rejected" if action == ACTION_REJECT else "Sent"
         await _safe_answer(event, ack_text, alert=False)
 
+        task = asyncio.create_task(self._process_callback_after_ack(event, action, post_id))
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            try:
+                done_task.result()
+            except Exception as exc:
+                _log(f"background callback task crashed for post {post_id}: {type(exc).__name__}: {exc}")
+
+        task.add_done_callback(_on_done)
+
+    async def _process_callback_after_ack(self, event, action: str, post_id: str) -> None:
         acquired, lock_message = self.pending.try_acquire(post_id, action)
         if not acquired:
-            # The callback was already acknowledged with the neutral grey toast above.
-            # Do not answer again with "already handled" text: Telegram clients may show
-            # the second answer instead, which is exactly the bad demo UX we avoid.
+            # The callback was already acknowledged with the neutral grey toast.
+            # Do not answer again: a second answer may override the desired UI.
             _log(f"callback {action} ignored for post {post_id}: {lock_message}")
             await _safe_remove_buttons(event)
             return
@@ -503,11 +517,8 @@ class TgTelethonPublisher:
                 post = self.pending.load(post_id)
             except FileNotFoundError:
                 self.pending.release(post_id)
-                await event.respond(
-                    f"Pending post `{post_id}` was not found in `{self.pending.root_dir}`. "
-                    "Check TG_PENDING_DIR and make sure the review bot was restarted with the new code.",
-                    parse_mode="md",
-                )
+                _log(f"pending post {post_id} not found after callback ack; root={self.pending.root_dir}")
+                await _safe_remove_buttons(event)
                 return
 
             _log(f"callback {action} started for post {post.id}")
@@ -523,9 +534,9 @@ class TgTelethonPublisher:
                 result_text = "published image only"
             elif action == ACTION_REJECT:
                 result_text = "rejected"
-            else:  # defensive, action was checked above
+            else:  # defensive, action was checked in handle_callback
                 self.pending.release(post_id)
-                await event.respond(f"Unknown action `{action}` for post `{post_id}`.", parse_mode="md")
+                _log(f"unknown action after callback ack: {action} for post {post_id}")
                 return
 
             self.pending.delete(post.id)
@@ -536,18 +547,24 @@ class TgTelethonPublisher:
         except (RPCError, OSError, RuntimeError, FileNotFoundError) as exc:
             self.pending.release(post_id)
             _log(f"callback {action} failed for post {post_id}: {type(exc).__name__}: {exc}")
-            await event.respond(
-                f"Action failed for `{post_id}`: `{type(exc).__name__}: {exc}`",
-                parse_mode="md",
-            )
+            try:
+                await event.respond(
+                    f"Action failed for `{post_id}`: `{type(exc).__name__}: {exc}`",
+                    parse_mode="md",
+                )
+            except Exception as respond_exc:
+                _log(f"failure response ignored: {type(respond_exc).__name__}: {respond_exc}")
+
         except Exception as exc:
             self.pending.release(post_id)
             _log(f"callback {action} failed for post {post_id}: {type(exc).__name__}: {exc}")
-            await event.respond(
-                f"Action failed for `{post_id}`: `{type(exc).__name__}: {exc}`",
-                parse_mode="md",
-            )
-            raise
+            try:
+                await event.respond(
+                    f"Action failed for `{post_id}`: `{type(exc).__name__}: {exc}`",
+                    parse_mode="md",
+                )
+            except Exception as respond_exc:
+                _log(f"failure response ignored: {type(respond_exc).__name__}: {respond_exc}")
 
     async def check_connection(self) -> None:
         await self.start()
