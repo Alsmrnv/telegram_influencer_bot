@@ -206,9 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Project generated data
-src/character/character_profile.json
-
 # Publisher Bot Stuff ;D
 .env.tools
 /data/tg_publisher
